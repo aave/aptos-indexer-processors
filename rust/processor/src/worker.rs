@@ -264,7 +264,7 @@ impl Worker {
         });
 
         let (transaction_events_tx, transaction_events_rx) =
-            kanal::bounded_async::<TransactionEvents>(10000);
+            kanal::bounded_async::<TransactionEvents>(1000000);
 
         // Create a gap detector task that will panic if there is a gap in the processing
         let (gap_detector_sender, gap_detector_receiver) =
@@ -475,7 +475,7 @@ impl Worker {
                     chain_id,
                     processor_name,
                     &auth_token,
-                    false, // enable_verbose_logging
+                    false , // enable_verbose_logging
                 )
                 .await;
 
