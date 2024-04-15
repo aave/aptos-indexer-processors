@@ -113,11 +113,15 @@ checksum = "9c7d0618f0e0b7e8ff11427422b64564d5fb0be1940354bfe2e0529b18a9d9b8"
 [[package]]
 name = "aptos-in-memory-cache"
 version = "0.1.0"
-source = "git+https://github.com/aptos-labs/aptos-core.git?rev=4bface43e64cfc2633d660847f007a2648924a95#4bface43e64cfc2633d660847f007a2648924a95"
+source = "git+https://github.com/aptos-labs/aptos-core.git?rev=0cb841c50353ee73f4e7f34aa9ff2274c8da1c57#0cb841c50353ee73f4e7f34aa9ff2274c8da1c57"
 dependencies = [
  "dashmap",
+ "futures",
+ "parking_lot",
  "quick_cache",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2962,6 +2966,7 @@ checksum = "806fe8c2c87eccc8b3267cbae29ed3ab2d0bd37fca70ab622e46aaa9375ddb7d"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",

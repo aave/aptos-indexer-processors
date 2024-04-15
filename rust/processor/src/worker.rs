@@ -42,7 +42,7 @@ use crate::{
 };
 use ahash::AHashMap;
 use anyhow::{Context, Result};
-use aptos_in_memory_cache::{caches::fifo::FIFOCache, Cache, Ordered};
+use aptos_in_memory_cache::{caches::fifo::FIFOCache, StreamableOrderedCache};
 use aptos_moving_average::MovingAverage;
 use futures::StreamExt;
 use kanal::AsyncSender;
@@ -61,9 +61,7 @@ pub const CONSUMER_THREAD_TIMEOUT_IN_SECS: u64 = 60 * 5;
 pub const PROCESSOR_SERVICE_TYPE: &str = "processor";
 
 /// Handles WebSocket connection from /filter endpoint
-async fn handle_websocket<
-    C: Cache<EventCacheKey, CachedEvent> + Ordered<EventCacheKey> + 'static,
->(
+async fn handle_websocket<C: StreamableOrderedCache<EventCacheKey, CachedEvent> + 'static>(
     websocket: warp::ws::WebSocket,
     query_params: AHashMap<String, String>,
     cache: Arc<C>,
@@ -287,7 +285,25 @@ impl Worker {
         });
 
         if self.processor_config.name() == "event_stream_processor".to_string() {
-            let cache = Arc::new(FIFOCache::<EventCacheKey, CachedEvent>::new(1000000));
+            let cache = Arc::new(FIFOCache::<EventCacheKey, CachedEvent>::new(
+                1000000,
+                1500000,
+                |k, getter| {
+                    let event = getter(k).unwrap();
+                    if event.event_stream_message.event_index + 1
+                        >= event.num_events_in_transaction as i64
+                    {
+                        return Some(EventCacheKey::new(
+                            event.event_stream_message.transaction_version + 1,
+                            0,
+                        ));
+                    }
+                    Some(EventCacheKey::new(
+                        event.event_stream_message.transaction_version,
+                        event.event_stream_message.event_index + 1,
+                    ))
+                },
+            ));
 
             // Add events to cache in order
             let cache_order = cache.clone();

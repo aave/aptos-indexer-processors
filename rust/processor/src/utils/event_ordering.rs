@@ -4,7 +4,7 @@ use crate::{
     utils::counters::LAST_TRANSACTION_VERSION_IN_CACHE,
 };
 use ahash::AHashMap;
-use aptos_in_memory_cache::{Cache, Ordered};
+use aptos_in_memory_cache::StreamableOrderedCache;
 use kanal::AsyncReceiver;
 use std::sync::Arc;
 use tracing::error;
@@ -29,12 +29,12 @@ impl PartialOrd for TransactionEvents {
     }
 }
 
-pub struct EventOrdering<C: Cache<EventCacheKey, CachedEvent> + Ordered<EventCacheKey> + 'static> {
+pub struct EventOrdering<C: StreamableOrderedCache<EventCacheKey, CachedEvent> + 'static> {
     rx: AsyncReceiver<Vec<TransactionEvents>>,
     cache: Arc<C>,
 }
 
-impl<C: Cache<EventCacheKey, CachedEvent> + Ordered<EventCacheKey> + 'static> EventOrdering<C> {
+impl<C: StreamableOrderedCache<EventCacheKey, CachedEvent> + 'static> EventOrdering<C> {
     pub fn new(rx: AsyncReceiver<Vec<TransactionEvents>>, cache: Arc<C>) -> Self {
         Self { rx, cache }
     }
