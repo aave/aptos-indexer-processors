@@ -289,19 +289,21 @@ impl Worker {
                 1000000,
                 1500000,
                 |k, getter| {
-                    let event = getter(k).unwrap();
-                    if event.event_stream_message.event_index + 1
-                        >= event.num_events_in_transaction as i64
-                    {
+                    if let Some(event) = getter(k) {
+                        if event.event_stream_message.event_index + 1
+                            >= event.num_events_in_transaction as i64
+                        {
+                            return Some(EventCacheKey::new(
+                                event.event_stream_message.transaction_version + 1,
+                                0,
+                            ));
+                        }
                         return Some(EventCacheKey::new(
-                            event.event_stream_message.transaction_version + 1,
-                            0,
+                            event.event_stream_message.transaction_version,
+                            event.event_stream_message.event_index + 1,
                         ));
                     }
-                    Some(EventCacheKey::new(
-                        event.event_stream_message.transaction_version,
-                        event.event_stream_message.event_index + 1,
-                    ))
+                    None
                 },
             ));
 

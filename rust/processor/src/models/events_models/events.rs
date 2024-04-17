@@ -77,6 +77,42 @@ impl Event {
 // Prevent conflicts with other things named `Event`
 pub type EventModel = Event;
 
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct EventContext {
+    pub coin_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct EventOrder {
+    pub sequence_number: i64,
+    pub creation_number: i64,
+    pub account_address: String,
+    pub transaction_version: i64,
+    pub transaction_block_height: i64,
+    pub type_: String,
+    pub data: serde_json::Value,
+    pub event_index: i64,
+    pub indexed_type: String,
+    pub context: Option<EventContext>,
+}
+
+impl EventOrder {
+    pub fn from_event(event: &Event, context: Option<EventContext>) -> Self {
+        EventOrder {
+            account_address: event.account_address.clone(),
+            creation_number: event.creation_number,
+            sequence_number: event.sequence_number,
+            transaction_version: event.transaction_version,
+            transaction_block_height: event.transaction_block_height,
+            type_: event.type_.clone(),
+            data: event.data.clone(),
+            event_index: event.event_index,
+            indexed_type: event.indexed_type.clone(),
+            context,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct EventStreamMessage {
     pub sequence_number: i64,
@@ -89,21 +125,26 @@ pub struct EventStreamMessage {
     pub event_index: i64,
     pub indexed_type: String,
     pub transaction_timestamp: chrono::NaiveDateTime,
+    pub context: Option<EventContext>,
 }
 
 impl EventStreamMessage {
-    pub fn from_event(event: &Event, transaction_timestamp: chrono::NaiveDateTime) -> Self {
+    pub fn from_event_order(
+        event_order: &EventOrder,
+        transaction_timestamp: chrono::NaiveDateTime,
+    ) -> Self {
         EventStreamMessage {
-            account_address: event.account_address.clone(),
-            creation_number: event.creation_number,
-            sequence_number: event.sequence_number,
-            transaction_version: event.transaction_version,
-            transaction_block_height: event.transaction_block_height,
-            type_: event.type_.clone(),
-            data: event.data.clone(),
-            event_index: event.event_index,
-            indexed_type: event.indexed_type.clone(),
+            account_address: event_order.account_address.clone(),
+            creation_number: event_order.creation_number,
+            sequence_number: event_order.sequence_number,
+            transaction_version: event_order.transaction_version,
+            transaction_block_height: event_order.transaction_block_height,
+            type_: event_order.type_.clone(),
+            data: event_order.data.clone(),
+            event_index: event_order.event_index,
+            indexed_type: event_order.indexed_type.clone(),
             transaction_timestamp,
+            context: event_order.context.clone(),
         }
     }
 }
@@ -138,6 +179,7 @@ impl CachedEvent {
                 event_index: 0,
                 indexed_type: "".to_string(),
                 transaction_timestamp: chrono::NaiveDateTime::default(),
+                context: None,
             },
             num_events_in_transaction: 0,
         }

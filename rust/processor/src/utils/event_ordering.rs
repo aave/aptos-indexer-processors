@@ -1,6 +1,6 @@
 use super::{counters::CACHE_SIZE_IN_BYTES, stream::EventCacheKey};
 use crate::{
-    models::events_models::events::{CachedEvent, EventModel, EventStreamMessage},
+    models::events_models::events::{CachedEvent, EventOrder, EventStreamMessage},
     utils::counters::LAST_TRANSACTION_VERSION_IN_CACHE,
 };
 use ahash::AHashMap;
@@ -13,7 +13,7 @@ use tracing::error;
 pub struct TransactionEvents {
     pub transaction_version: i64,
     pub transaction_timestamp: chrono::NaiveDateTime,
-    pub events: Vec<EventModel>,
+    pub events: Vec<EventOrder>,
 }
 
 impl Ord for TransactionEvents {
@@ -72,7 +72,7 @@ impl<C: StreamableOrderedCache<EventCacheKey, CachedEvent> + 'static> EventOrder
                         self.cache.insert(
                             EventCacheKey::new(event.transaction_version, event.event_index),
                             CachedEvent::from_event_stream_message(
-                                &EventStreamMessage::from_event(&event, transaction_timestamp),
+                                &EventStreamMessage::from_event_order(&event, transaction_timestamp),
                                 num_events,
                             ),
                         );

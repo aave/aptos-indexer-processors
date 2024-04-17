@@ -2,11 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    models::events_models::events::EventModel,
+    models::{
+        events_models::events::{EventContext, EventModel, EventOrder},
+        fungible_asset_models::{
+            v2_fungible_asset_activities::{EventToCoinType, FungibleAssetActivity},
+            v2_fungible_asset_balances::FungibleAssetBalance,
+        },
+    },
     processors::{ProcessingResult, ProcessorName, ProcessorTrait},
-    utils::{database::PgDbPool, event_ordering::TransactionEvents, util::parse_timestamp},
+    utils::{
+        database::PgDbPool,
+        event_ordering::TransactionEvents,
+        util::{get_entry_function_from_user_request, parse_timestamp},
+    },
 };
-use aptos_protos::transaction::v1::{transaction::TxnData, Transaction};
+use ahash::AHashMap;
+use aptos_protos::transaction::v1::{transaction::TxnData, write_set_change::Change, Transaction};
 use async_trait::async_trait;
 use kanal::AsyncSender;
 use std::fmt::Debug;
@@ -54,20 +65,82 @@ impl ProcessorTrait for EventStreamProcessor {
         for txn in &transactions {
             let txn_version = txn.version as i64;
             let block_height = txn.block_height as i64;
-            let txn_timestamp = parse_timestamp(txn.timestamp.as_ref().unwrap(), txn_version);
             let txn_data = txn.txn_data.as_ref().expect("Txn Data doesn't exit!");
+            let transaction_info = txn.info.as_ref().expect("Transaction info doesn't exist!");
+            let txn_timestamp = parse_timestamp(txn.timestamp.as_ref().unwrap(), txn_version);
             let default = vec![];
-            let raw_events = match txn_data {
-                TxnData::BlockMetadata(tx_inner) => &tx_inner.events,
-                TxnData::Genesis(tx_inner) => &tx_inner.events,
-                TxnData::User(tx_inner) => &tx_inner.events,
-                _ => &default,
+            let (raw_events, _user_request, entry_function_id_str) = match txn_data {
+                TxnData::BlockMetadata(tx_inner) => (&tx_inner.events, None, None),
+                TxnData::Genesis(tx_inner) => (&tx_inner.events, None, None),
+                TxnData::User(tx_inner) => {
+                    let user_request = tx_inner
+                        .request
+                        .as_ref()
+                        .expect("Sends is not present in user txn");
+                    let entry_function_id_str = get_entry_function_from_user_request(user_request);
+                    (&tx_inner.events, Some(user_request), entry_function_id_str)
+                },
+                _ => (&default, None, None),
             };
+
+            // // This is because v1 events (deposit/withdraw) don't have coin type so the only way is to match
+            // // the event to the resource using the event guid
+            // let mut event_to_v1_coin_type: EventToCoinType = AHashMap::new();
+
+            // for (index, wsc) in transaction_info.changes.iter().enumerate() {
+            //     if let Change::WriteResource(write_resource) = wsc.change.as_ref().unwrap() {
+            //         if let Some((_balance, _current_balance, event_to_coin)) =
+            //             FungibleAssetBalance::get_v1_from_write_resource(
+            //                 write_resource,
+            //                 index as i64,
+            //                 txn_version,
+            //                 txn_timestamp,
+            //             )
+            //             .unwrap()
+            //         {
+            //             event_to_v1_coin_type.extend(event_to_coin);
+            //         }
+            //     }
+            // }
+
+            // let mut event_context = AHashMap::new();
+            // for (index, event) in raw_events.iter().enumerate() {
+            //     // Only support v1 for now
+            //     if let Some(v1_activity) = FungibleAssetActivity::get_v1_from_event(
+            //         event,
+            //         txn_version,
+            //         block_height,
+            //         txn_timestamp,
+            //         &entry_function_id_str,
+            //         &event_to_v1_coin_type,
+            //         index as i64,
+            //     )
+            //     .unwrap_or_else(|e| {
+            //         tracing::error!(
+            //             transaction_version = txn_version,
+            //             index = index,
+            //             error = ?e,
+            //             "[Parser] error parsing fungible asset activity v1");
+            //         panic!("[Parser] error parsing fungible asset activity v1");
+            //     }) {
+            //         event_context.insert((txn_version, index as i64), EventContext {
+            //             coin_type: v1_activity.asset_type.clone(),
+            //         });
+            //     }
+            // }
 
             batch.push(TransactionEvents {
                 transaction_version: txn_version,
                 transaction_timestamp: txn_timestamp,
-                events: EventModel::from_events(raw_events, txn_version, block_height),
+                events: EventModel::from_events(raw_events, txn_version, block_height)
+                    .iter()
+                    .map(|event| {
+                        // let context = event_context
+                        //     .get(&(txn_version, event.event_index))
+                        //     .cloned();
+                        EventOrder::from_event(&event, None)
+                    })
+                    .collect(),
             });
         }
 
