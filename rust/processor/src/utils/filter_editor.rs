@@ -3,18 +3,28 @@
 use crate::utils::filter::EventFilter;
 use futures::{stream::SplitStream, StreamExt};
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tracing::{error, info};
 use warp::filters::ws::WebSocket;
 
 pub struct FilterEditor {
     rx: SplitStream<WebSocket>,
     filter: Arc<EventFilter>,
+    filter_edit_notify: Arc<Notify>,
 }
 
 impl FilterEditor {
-    pub fn new(rx: SplitStream<WebSocket>, filter: Arc<EventFilter>) -> Self {
+    pub fn new(
+        rx: SplitStream<WebSocket>,
+        filter: Arc<EventFilter>,
+        filter_edit_notify: Arc<Notify>,
+    ) -> Self {
         info!("Received WebSocket connection");
-        Self { rx, filter }
+        Self {
+            rx,
+            filter,
+            filter_edit_notify,
+        }
     }
 
     /// Maintains websocket connection and sends messages from channel
@@ -49,12 +59,17 @@ impl FilterEditor {
                         error!("[Event Stream] Invalid filter type: {}", policy[0]);
                     },
                 }
+                self.filter_edit_notify.notify_waiters();
             }
         }
     }
 }
 
-pub async fn spawn_filter_editor(rx: SplitStream<WebSocket>, filter: Arc<EventFilter>) {
-    let mut filter = FilterEditor::new(rx, filter);
+pub async fn spawn_filter_editor(
+    rx: SplitStream<WebSocket>,
+    filter: Arc<EventFilter>,
+    filter_edit_notify: Arc<Notify>,
+) {
+    let mut filter = FilterEditor::new(rx, filter, filter_edit_notify);
     filter.run().await;
 }

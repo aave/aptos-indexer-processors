@@ -265,6 +265,15 @@ pub static GRPC_TO_PROCESSOR_1_SERVE_LATENCY_IN_SECS: Lazy<Gauge> = Lazy::new(||
     .unwrap()
 });
 
+/// First value in cache
+pub static FIRST_TRANSACTION_VERSION_IN_CACHE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "indexer_first_transaction_version_in_cache",
+        "First value in cache"
+    )
+    .unwrap()
+});
+
 /// Last value in cache
 pub static LAST_TRANSACTION_VERSION_IN_CACHE: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(

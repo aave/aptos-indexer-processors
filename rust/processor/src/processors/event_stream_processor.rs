@@ -3,7 +3,9 @@
 
 use crate::{
     models::{
-        events_models::events::{EventContext, EventModel, EventOrder},
+        events_models::events::{
+            CachedEvent, EventContext, EventModel, EventOrder, EventStreamMessage,
+        },
         fungible_asset_models::{
             v2_fungible_asset_activities::{EventToCoinType, FungibleAssetActivity},
             v2_fungible_asset_balances::FungibleAssetBalance,
@@ -12,7 +14,7 @@ use crate::{
     processors::{ProcessingResult, ProcessorName, ProcessorTrait},
     utils::{
         database::PgDbPool,
-        event_ordering::TransactionEvents,
+        stream::EventCacheKey,
         util::{get_entry_function_from_user_request, parse_timestamp},
     },
 };
@@ -22,13 +24,23 @@ use async_trait::async_trait;
 use kanal::AsyncSender;
 use std::fmt::Debug;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionEvents {
+    pub transaction_version: i64,
+    pub transaction_timestamp: chrono::NaiveDateTime,
+    pub events: Vec<EventOrder>,
+}
+
 pub struct EventStreamProcessor {
     connection_pool: PgDbPool,
-    channel: AsyncSender<Vec<TransactionEvents>>,
+    channel: AsyncSender<(EventCacheKey, CachedEvent)>,
 }
 
 impl EventStreamProcessor {
-    pub fn new(connection_pool: PgDbPool, channel: AsyncSender<Vec<TransactionEvents>>) -> Self {
+    pub fn new(
+        connection_pool: PgDbPool,
+        channel: AsyncSender<(EventCacheKey, CachedEvent)>,
+    ) -> Self {
         Self {
             connection_pool,
             channel,
@@ -83,51 +95,51 @@ impl ProcessorTrait for EventStreamProcessor {
                 _ => (&default, None, None),
             };
 
-            // // This is because v1 events (deposit/withdraw) don't have coin type so the only way is to match
-            // // the event to the resource using the event guid
-            // let mut event_to_v1_coin_type: EventToCoinType = AHashMap::new();
+            // This is because v1 events (deposit/withdraw) don't have coin type so the only way is to match
+            // the event to the resource using the event guid
+            let mut event_to_v1_coin_type: EventToCoinType = AHashMap::new();
 
-            // for (index, wsc) in transaction_info.changes.iter().enumerate() {
-            //     if let Change::WriteResource(write_resource) = wsc.change.as_ref().unwrap() {
-            //         if let Some((_balance, _current_balance, event_to_coin)) =
-            //             FungibleAssetBalance::get_v1_from_write_resource(
-            //                 write_resource,
-            //                 index as i64,
-            //                 txn_version,
-            //                 txn_timestamp,
-            //             )
-            //             .unwrap()
-            //         {
-            //             event_to_v1_coin_type.extend(event_to_coin);
-            //         }
-            //     }
-            // }
+            for (index, wsc) in transaction_info.changes.iter().enumerate() {
+                if let Change::WriteResource(write_resource) = wsc.change.as_ref().unwrap() {
+                    if let Some((_balance, _current_balance, event_to_coin)) =
+                        FungibleAssetBalance::get_v1_from_write_resource(
+                            write_resource,
+                            index as i64,
+                            txn_version,
+                            txn_timestamp,
+                        )
+                        .unwrap()
+                    {
+                        event_to_v1_coin_type.extend(event_to_coin);
+                    }
+                }
+            }
 
-            // let mut event_context = AHashMap::new();
-            // for (index, event) in raw_events.iter().enumerate() {
-            //     // Only support v1 for now
-            //     if let Some(v1_activity) = FungibleAssetActivity::get_v1_from_event(
-            //         event,
-            //         txn_version,
-            //         block_height,
-            //         txn_timestamp,
-            //         &entry_function_id_str,
-            //         &event_to_v1_coin_type,
-            //         index as i64,
-            //     )
-            //     .unwrap_or_else(|e| {
-            //         tracing::error!(
-            //             transaction_version = txn_version,
-            //             index = index,
-            //             error = ?e,
-            //             "[Parser] error parsing fungible asset activity v1");
-            //         panic!("[Parser] error parsing fungible asset activity v1");
-            //     }) {
-            //         event_context.insert((txn_version, index as i64), EventContext {
-            //             coin_type: v1_activity.asset_type.clone(),
-            //         });
-            //     }
-            // }
+            let mut event_context = AHashMap::new();
+            for (index, event) in raw_events.iter().enumerate() {
+                // Only support v1 for now
+                if let Some(v1_activity) = FungibleAssetActivity::get_v1_from_event(
+                    event,
+                    txn_version,
+                    block_height,
+                    txn_timestamp,
+                    &entry_function_id_str,
+                    &event_to_v1_coin_type,
+                    index as i64,
+                )
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        transaction_version = txn_version,
+                        index = index,
+                        error = ?e,
+                        "[Parser] error parsing fungible asset activity v1");
+                    panic!("[Parser] error parsing fungible asset activity v1");
+                }) {
+                    event_context.insert((txn_version, index as i64), EventContext {
+                        coin_type: v1_activity.asset_type.clone(),
+                    });
+                }
+            }
 
             batch.push(TransactionEvents {
                 transaction_version: txn_version,
@@ -135,16 +147,47 @@ impl ProcessorTrait for EventStreamProcessor {
                 events: EventModel::from_events(raw_events, txn_version, block_height)
                     .iter()
                     .map(|event| {
-                        // let context = event_context
-                        //     .get(&(txn_version, event.event_index))
-                        //     .cloned();
-                        EventOrder::from_event(&event, None)
+                        let context = event_context
+                            .get(&(txn_version, event.event_index))
+                            .cloned();
+                        EventOrder::from_event(&event, context)
                     })
                     .collect(),
             });
         }
 
-        self.channel.send(batch).await?;
+        for events in batch {
+            let transaction_timestamp = events.transaction_timestamp;
+            let num_events = events.events.len();
+            if num_events == 0 {
+                // Add empty event if transaction doesn't have any events
+                self.channel
+                    .send((
+                        EventCacheKey::new(events.transaction_version, 0),
+                        CachedEvent::empty(events.transaction_version),
+                    ))
+                    .await
+                    .unwrap();
+            } else {
+                // Add all events to cache
+                for event in events.events {
+                    self.channel
+                        .send((
+                            EventCacheKey::new(event.transaction_version, event.event_index),
+                            CachedEvent::from_event_stream_message(
+                                &EventStreamMessage::from_event_order(
+                                    &event,
+                                    transaction_timestamp,
+                                ),
+                                num_events,
+                            ),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
         let processing_duration_in_secs = processing_start.elapsed().as_secs_f64();
         Ok(ProcessingResult {
             start_version,

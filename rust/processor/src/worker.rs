@@ -23,6 +23,7 @@ use crate::{
     schema::ledger_infos,
     transaction_filter::TransactionFilter,
     utils::{
+        cache_writer::CacheWriter,
         counters::{
             ProcessorStep, GRPC_LATENCY_BY_PROCESSOR_IN_SECS, LATEST_PROCESSED_VERSION,
             NUM_TRANSACTIONS_PROCESSED_COUNT, PB_CHANNEL_FETCH_WAIT_TIME_SECS,
@@ -33,7 +34,6 @@ use crate::{
             SINGLE_BATCH_PROCESSING_TIME_IN_SECS, TRANSACTION_UNIX_TIMESTAMP,
         },
         database::{execute_with_better_error_conn, new_db_pool, run_pending_migrations, PgDbPool},
-        event_ordering::{EventOrdering, TransactionEvents},
         filter::EventFilter,
         filter_editor::spawn_filter_editor,
         stream::{spawn_stream, EventCacheKey},
@@ -47,7 +47,7 @@ use aptos_moving_average::MovingAverage;
 use futures::StreamExt;
 use kanal::AsyncSender;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio::{sync::Notify, task::JoinHandle};
 use tracing::{debug, error, info};
 use url::Url;
 use warp::Filter;
@@ -69,19 +69,22 @@ async fn handle_websocket<C: StreamableOrderedCache<EventCacheKey, CachedEvent> 
     let (tx, rx) = websocket.split();
     let filter = Arc::new(EventFilter::new());
 
-    let start = query_params
-        .get("start")
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(0);
+    let start: Option<i64> = query_params.get("start").map(|s| s.parse::<i64>().unwrap());
 
     let filter_edit = filter.clone();
-    tokio::spawn(async move { spawn_filter_editor(rx, filter_edit).await });
+    let filter_edit_notify = Arc::new(Notify::new());
+
+    let filter_edit_notify_clone = filter_edit_notify.clone();
+    tokio::spawn(
+        async move { spawn_filter_editor(rx, filter_edit, filter_edit_notify_clone).await },
+    );
 
     spawn_stream(
         tx,
         filter.clone(),
         cache.clone(),
-        EventCacheKey::new(start, 0),
+        start.and_then(|s| Some(EventCacheKey::new(s, 0))),
+        filter_edit_notify,
     )
     .await;
 }
@@ -261,8 +264,30 @@ impl Worker {
             .await
         });
 
-        let (transaction_events_tx, transaction_events_rx) =
-            kanal::bounded_async::<Vec<TransactionEvents>>(1000000000);
+        let cache = Arc::new(FIFOCache::<EventCacheKey, CachedEvent>::new(
+            10000000,
+            11000000,
+            |k, getter| {
+                if let Some(event) = getter(k) {
+                    if event.event_stream_message.event_index + 1
+                        >= event.num_events_in_transaction as i64
+                    {
+                        return Some(EventCacheKey::new(
+                            event.event_stream_message.transaction_version + 1,
+                            0,
+                        ));
+                    }
+                    return Some(EventCacheKey::new(
+                        event.event_stream_message.transaction_version,
+                        event.event_stream_message.event_index + 1,
+                    ));
+                }
+                None
+            },
+        ));
+
+        let (cache_tx, cache_rx) =
+            kanal::bounded_async::<(EventCacheKey, CachedEvent)>(BUFFER_SIZE);
 
         // Create a gap detector task that will panic if there is a gap in the processing
         let (gap_detector_sender, gap_detector_receiver) =
@@ -272,7 +297,7 @@ impl Worker {
             &self.processor_config,
             self.per_table_chunk_sizes.clone(),
             self.db_pool.clone(),
-            transaction_events_tx.clone(),
+            cache_tx.clone(),
         );
         tokio::spawn(async move {
             crate::gap_detector::create_gap_detector_status_tracker_loop(
@@ -285,47 +310,22 @@ impl Worker {
         });
 
         if self.processor_config.name() == "event_stream_processor".to_string() {
-            let cache = Arc::new(FIFOCache::<EventCacheKey, CachedEvent>::new(
-                1000000,
-                1500000,
-                |k, getter| {
-                    if let Some(event) = getter(k) {
-                        if event.event_stream_message.event_index + 1
-                            >= event.num_events_in_transaction as i64
-                        {
-                            return Some(EventCacheKey::new(
-                                event.event_stream_message.transaction_version + 1,
-                                0,
-                            ));
-                        }
-                        return Some(EventCacheKey::new(
-                            event.event_stream_message.transaction_version,
-                            event.event_stream_message.event_index + 1,
-                        ));
-                    }
-                    None
-                },
-            ));
-
-            // Add events to cache in order
-            let cache_order = cache.clone();
+            // Create cache writer
+            let cache_cw = cache.clone();
             tokio::spawn(async move {
-                let event_ordering = EventOrdering::new(transaction_events_rx, cache_order);
-                event_ordering.run(starting_version as i64).await;
+                let mut cache_writer = CacheWriter::new(cache_rx, cache_cw);
+                cache_writer.run().await;
             });
 
             // Create web server
-            let cache_ws = cache.clone();
-            let cache_ws = warp::any().map(move || cache_ws.clone());
+            let cache_ws = warp::any().map(move || cache.clone());
             tokio::spawn(async move {
                 let ws_route = warp::path("stream")
                     .and(warp::ws())
                     .and(warp::query::<AHashMap<String, String>>())
                     .and(cache_ws)
-                    .map(|ws: warp::ws::Ws, query_params, cache_ws| {
-                        ws.on_upgrade(move |socket| {
-                            handle_websocket(socket, query_params, cache_ws)
-                        })
+                    .map(|ws: warp::ws::Ws, query_params, cache| {
+                        ws.on_upgrade(move |socket| handle_websocket(socket, query_params, cache))
                     });
 
                 warp::serve(ws_route).run(([0, 0, 0, 0], 12345)).await;
@@ -354,7 +354,7 @@ impl Worker {
                     task_index,
                     receiver.clone(),
                     gap_detector_sender.clone(),
-                    transaction_events_tx.clone(),
+                    cache_tx.clone(),
                 )
                 .await;
             processor_tasks.push(join_handle);
@@ -379,7 +379,7 @@ impl Worker {
         task_index: usize,
         receiver: kanal::AsyncReceiver<TransactionsPBResponse>,
         gap_detector_sender: kanal::AsyncSender<ProcessingResult>,
-        channel: AsyncSender<Vec<TransactionEvents>>,
+        channel: AsyncSender<(EventCacheKey, CachedEvent)>,
     ) -> JoinHandle<()> {
         let processor_name = self.processor_config.name();
         let stream_address = self.indexer_grpc_data_service_address.to_string();
@@ -791,7 +791,7 @@ pub fn build_processor(
     config: &ProcessorConfig,
     per_table_chunk_sizes: AHashMap<String, usize>,
     db_pool: PgDbPool,
-    channel: AsyncSender<Vec<TransactionEvents>>,
+    channel: AsyncSender<(EventCacheKey, CachedEvent)>,
 ) -> Processor {
     match config {
         ProcessorConfig::AccountTransactionsProcessor => Processor::from(
