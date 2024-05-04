@@ -21,6 +21,7 @@ use ahash::{AHashMap, AHashSet};
 use anyhow::{Context, Result};
 use aptos_protos::transaction::v1::{Event, WriteResource};
 use bigdecimal::BigDecimal;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Formatter};
 
@@ -28,6 +29,10 @@ pub const TOKEN_V2_ADDR: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000004";
 
 pub const DEFAULT_OWNER_ADDRESS: &str = "unknown";
+
+lazy_static! {
+    pub static ref V2_STANDARD: String = TokenStandard::V2.to_string();
+}
 
 /// Tracks all token related data in a hashmap for quick access (keyed on address of the object core)
 /// Maps address to burn event (new). The event is None if it's an old burn event.

@@ -12,19 +12,20 @@ use crate::{
     models::{
         coin_models::coin_utils::{CoinInfoType, CoinResource},
         object_models::v2_object_utils::ObjectAggregatedDataMapping,
-        token_v2_models::v2_token_utils::TokenStandard,
+        token_v2_models::v2_token_utils::{TokenStandard, V2_STANDARD},
     },
-    schema::{current_fungible_asset_balances, fungible_asset_balances},
-    utils::util::standardize_address,
+    schema::{
+        current_fungible_asset_balances, current_unified_fungible_asset_balances,
+        fungible_asset_balances,
+    },
+    utils::util::{hex_to_raw_bytes, sha3_256, standardize_address, APT_METADATA_ADDRESS},
 };
 use ahash::AHashMap;
 use aptos_protos::transaction::v1::WriteResource;
 use bigdecimal::BigDecimal;
 use field_count::FieldCount;
-use hex::FromHex;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
-use sha3::Sha3_256;
+use std::borrow::Borrow;
 
 // Storage id
 pub type CurrentFungibleAssetBalancePK = String;
@@ -60,6 +61,83 @@ pub struct CurrentFungibleAssetBalance {
     pub last_transaction_version: i64,
     pub last_transaction_timestamp: chrono::NaiveDateTime,
     pub token_standard: String,
+}
+
+#[derive(Clone, Debug, Deserialize, FieldCount, Identifiable, Insertable, Serialize, Default)]
+#[diesel(primary_key(storage_id))]
+#[diesel(table_name = current_unified_fungible_asset_balances)]
+#[diesel(treat_none_as_null = true)]
+pub struct CurrentUnifiedFungibleAssetBalance {
+    pub storage_id: String,
+    pub owner_address: String,
+    // metadata address for (paired) Fungible Asset
+    pub asset_type: String,
+    pub coin_type: Option<String>,
+    pub is_primary: Option<bool>,
+    pub is_frozen: bool,
+    pub amount_v1: Option<BigDecimal>,
+    pub amount_v2: Option<BigDecimal>,
+    pub last_transaction_version_v1: Option<i64>,
+    pub last_transaction_version_v2: Option<i64>,
+    pub last_transaction_timestamp_v1: Option<chrono::NaiveDateTime>,
+    pub last_transaction_timestamp_v2: Option<chrono::NaiveDateTime>,
+}
+
+fn get_paired_metadata_address(coin_type_name: &str) -> anyhow::Result<String> {
+    let mut preimage = APT_METADATA_ADDRESS.as_bytes().to_vec();
+    preimage.extend(coin_type_name.as_bytes());
+    preimage.push(0xFE);
+    Ok(String::from_utf8(sha3_256(&preimage).to_vec())?)
+}
+
+fn get_primary_fungible_store_address(
+    owner_address: &str,
+    metadata_address: &str,
+) -> anyhow::Result<String> {
+    let mut preimage = hex_to_raw_bytes(owner_address)?;
+    preimage.append(&mut hex_to_raw_bytes(metadata_address)?);
+    preimage.push(0xFC);
+    Ok(format!("0x{}", hex::encode(sha3_256(&preimage))))
+}
+
+impl From<&CurrentFungibleAssetBalance> for CurrentUnifiedFungibleAssetBalance {
+    fn from(cfab: &CurrentFungibleAssetBalance) -> Self {
+        if cfab.token_standard.as_str() == V2_STANDARD.borrow().as_str() {
+            Self {
+                storage_id: cfab.storage_id.clone(),
+                owner_address: cfab.owner_address.clone(),
+                asset_type: cfab.asset_type.clone(),
+                coin_type: None,
+                is_primary: Some(cfab.is_primary),
+                is_frozen: cfab.is_frozen,
+                amount_v1: None,
+                amount_v2: Some(cfab.amount.clone()),
+                last_transaction_version_v1: None,
+                last_transaction_version_v2: Some(cfab.last_transaction_version),
+                last_transaction_timestamp_v1: None,
+                last_transaction_timestamp_v2: Some(cfab.last_transaction_timestamp),
+            }
+        } else {
+            let metadata_addr = get_paired_metadata_address(&cfab.asset_type)
+                .expect("calculate paired metadata address failed");
+            let pfs_addr = get_primary_fungible_store_address(&cfab.owner_address, &metadata_addr)
+                .expect("calculate pfs_address failed");
+            Self {
+                storage_id: pfs_addr,
+                owner_address: cfab.owner_address.clone(),
+                asset_type: metadata_addr,
+                coin_type: Some(cfab.asset_type.clone()),
+                is_primary: None,
+                is_frozen: cfab.is_frozen,
+                amount_v1: Some(cfab.amount.clone()),
+                amount_v2: None,
+                last_transaction_version_v1: Some(cfab.last_transaction_version),
+                last_transaction_version_v2: None,
+                last_transaction_timestamp_v1: Some(cfab.last_transaction_timestamp),
+                last_transaction_timestamp_v2: None,
+            }
+        }
+    }
 }
 
 impl FungibleAssetBalance {
@@ -178,17 +256,8 @@ impl FungibleAssetBalance {
         metadata_address: &str,
         fungible_store_address: &str,
     ) -> bool {
-        let owner_address_bytes = <[u8; 32]>::from_hex(&owner_address[2..]).unwrap();
-        let metadata_address_bytes = <[u8; 32]>::from_hex(&metadata_address[2..]).unwrap();
-
-        // construct the expected metadata address
-        let mut hasher = Sha3_256::new();
-        hasher.update(owner_address_bytes);
-        hasher.update(metadata_address_bytes);
-        hasher.update([0xFC]);
-        let hash_result = hasher.finalize();
-        // compare address to actual metadata address
-        hex::encode(hash_result) == fungible_store_address[2..]
+        fungible_store_address
+            == get_primary_fungible_store_address(owner_address, metadata_address).unwrap()
     }
 }
 
