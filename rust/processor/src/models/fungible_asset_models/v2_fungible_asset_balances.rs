@@ -8,7 +8,6 @@
 use super::{
     v2_fungible_asset_activities::EventToCoinType,
     v2_fungible_asset_utils::{ConcurrentFungibleAssetBalance, FungibleAssetStore},
-    v2_fungible_metadata::FungibleAssetMetadataModel,
 };
 use crate::{
     models::{
